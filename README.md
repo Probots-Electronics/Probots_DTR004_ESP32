@@ -9,17 +9,14 @@
 
 ---
 
-## Why this SDK vs. the v1 library?
+## Features
 
-| Feature | v1 (DTR004-Library) | v2 (this SDK) |
-|---|---|---|
-| Relay control | `setRelay(int, int)` | `setRelay(Channel, RelayState)` typed enum |
-| Input reads | Returns `String` | Returns `uint8_t` bitmask |
-| Async / Non-blocking | ✗ — blocks `loop()` | ✓ — cooperative state machine |
-| Modbus TCP | ✗ | ✓ — dedicated `DTR004_ModbusTCP` class |
-| Error handling | Serial print only | `DTR004::Error` enum, per-instance counters |
-| Network heartbeat | ✗ | ✓ — configurable interval + callback |
-| Batch relay write | ✗ | ✓ — `setRelayBitmask()` / `setAllRelays()` |
+- Type-safe relay control via `Channel` and `RelayState` enums
+- `uint8_t` bitmask I/O for all relay and digital input reads
+- Non-blocking async API — cooperative state machine, `loop()` never stalls
+- Modbus TCP protocol layer — persistent connection, atomic 4-relay writes
+- Network heartbeat with configurable interval and online/offline callback
+- Rich error handling — `DTR004::Error` enum + per-instance success/failure counters
 
 ---
 
@@ -41,7 +38,7 @@ lib_deps = https://github.com/Probots-Electronics/Probots_DTR004_ESP32
 
 ## Quick Start
 
-### Synchronous API (drop-in upgrade from v1)
+### Synchronous API
 
 ```cpp
 #include <WiFi.h>
@@ -173,22 +170,29 @@ DTR004_ModbusTCP(const char* ip, uint16_t port = 502, uint8_t unitId = 1);
 
 #### Relay / Input API
 
-| Method | Description |
-|---|---|
-| `connect()` / `disconnect()` | Manage persistent TCP connection |
-| `setRelay(Channel, RelayState)` | FC 0x05 single coil write |
-| `setAllRelays(uint8_t bitmask)` | FC 0x0F atomic multi-coil write |
-| `readRelayStates(Error*)` | FC 0x01 read 4 coils → bitmask |
-| `readInputStates(Error*)` | FC 0x02 read 4 discrete inputs → bitmask |
+| Method | FC | Description |
+|---|---|---|
+| `connect()` / `disconnect()` | — | Manage persistent TCP connection |
+| `setRelay(Channel, RelayState)` | 0x06 | Write one relay (reg `0x0036+N`) |
+| `setAllRelays(uint8_t bitmask)` | 0x06 | Atomic 4-relay write (reg `0x0002`) |
+| `readRelayStates(Error*)` | 0x03 | Read relay bitmask (reg `0x0001`) |
+| `readInputStates(Error*)` | 0x03 | Read input bitmask (reg `0x000A`) |
 
-#### Raw Modbus API
+#### Register / Sensor API
 
 | Method | FC | Description |
 |---|---|---|
-| `writeCoil(addr, bool)` | 0x05 | Write single coil |
-| `writeMultipleCoils(addr, n, vals[])` | 0x0F | Write n coils |
-| `readCoils(addr, n, buf[])` | 0x01 | Read n coils |
-| `readDiscreteInputs(addr, n, buf[])` | 0x02 | Read n discrete inputs |
+| `readHoldingRegisters(addr, n, regs[])` | 0x03 | Read n 16-bit holding registers |
+| `readInputRegisters(addr, n, regs[])` | 0x04 | Read n 16-bit input registers (live sensor values) |
+| `writeSingleRegister(addr, value)` | 0x06 | Write one 16-bit holding register |
+
+#### Diagnostics
+
+| Method | Description |
+|---|---|
+| `getLastError()` | Last `DTR004::Error` code |
+| `getLastExceptionCode()` | Raw Modbus exception byte (when error is `MB_*` or `DEVICE_NOT_FOUND`) |
+| `errorToString(err)` | Human-readable error string |
 
 ---
 
@@ -197,9 +201,17 @@ DTR004_ModbusTCP(const char* ip, uint16_t port = 502, uint8_t unitId = 1);
 ```cpp
 enum class Channel   : uint8_t { CH1=1, CH2, CH3, CH4 };
 enum class RelayState: uint8_t { OFF=0, ON=1 };
-enum class Error     : uint8_t { NONE, UNREACHABLE, TIMEOUT,
-                                  PARSE_FAILED, INVALID_CHANNEL,
-                                  BUSY, WIFI_DISCONNECTED };
+enum class Error     : uint8_t {
+    // Transport errors
+    NONE, UNREACHABLE, TIMEOUT, PARSE_FAILED, INVALID_CHANNEL,
+    BUSY, WIFI_DISCONNECTED,
+    // Modbus exception codes (DTR004_ModbusTCP only)
+    DEVICE_NOT_FOUND,  // Exception 0x02/0x0B: RS485 slave not responding
+    MB_ILLEGAL_FUNC,   // Exception 0x01: function code not supported
+    MB_ILLEGAL_VALUE,  // Exception 0x03: value out of slave range
+    MB_SLAVE_FAILURE,  // Exception 0x04: slave internal failure
+    MB_EXCEPTION       // Any other Modbus exception (see getLastExceptionCode())
+};
 
 // Bitmask helpers
 bool    isBitSet(uint8_t mask, uint8_t ch);  // ch = 1..4
@@ -216,32 +228,25 @@ void (*ConnectionCallback)(bool connected);
 
 ## DT-R004 Register Map (Modbus TCP)
 
-| Type | Address | Description |
+Unit ID **0xFF** addresses the DT-R004's own relays and inputs.  
+Unit IDs **1–247** are forwarded to the RS485 bus.
+
+All DT-R004 registers use **Holding Registers** (FC 0x03 read / FC 0x06 write):
+
+| Register | FC | Description |
 |---|---|---|
-| Coil | 0x0000 | Relay 1 |
-| Coil | 0x0001 | Relay 2 |
-| Coil | 0x0002 | Relay 3 |
-| Coil | 0x0003 | Relay 4 |
-| Discrete Input | 0x0000 | Digital Input 1 |
-| Discrete Input | 0x0001 | Digital Input 2 |
-| Discrete Input | 0x0002 | Digital Input 3 |
-| Discrete Input | 0x0003 | Digital Input 4 |
-
----
-
-## Migrating from v1 (DTR004-Library)
-
-```cpp
-// v1
-DTR004 relay("192.168.7.1");
-relay.setRelay(1, 1);
-String s = relay.getInputs();
-
-// v2 — equivalent
-Probots_DTR004_ESP32 relay("192.168.7.1");
-relay.setRelay(DTR004::Channel::CH1, DTR004::RelayState::ON);
-uint8_t inputs = relay.getInputStates();
-```
+| `0x0000` | 0x03 | Relay count (2 / 4 / 8 / 16 / 32) |
+| `0x0001` | 0x03 | Relay status bitmask (bit 0 = Relay 1) |
+| `0x0002` | 0x06 | Write all relays — high byte = update mask, low byte = new states |
+| `0x0016` | 0x03 | Digital Input 1 state (0 = LOW, 1 = HIGH) |
+| `0x0017` | 0x03 | Digital Input 2 state |
+| `0x0018` | 0x03 | Digital Input 3 state |
+| `0x0019` | 0x03 | Digital Input 4 state |
+| `0x000A` | 0x03 | Input status bitmask (bit 0 = DI1) |
+| `0x0036` | 0x03/0x06 | Relay 1 individual R/W (0 = OFF, 1 = ON) |
+| `0x0037` | 0x03/0x06 | Relay 2 individual R/W |
+| `0x0038` | 0x03/0x06 | Relay 3 individual R/W |
+| `0x0039` | 0x03/0x06 | Relay 4 individual R/W |
 
 ---
 
