@@ -1,11 +1,16 @@
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2024 Probots Electronics (probots.co.in)
+ */
+
 #include "Probots_DTR004_ESP32.h"
 
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
 
-Probots_DTR004_ESP32::Probots_DTR004_ESP32(const char* ip, uint16_t port)
-    : _ip(ip), _port(port),
+Probots_DTR004_ESP32::Probots_DTR004_ESP32(const char* ip, uint16_t port, uint8_t relayCount)
+    : _ip(ip), _port(port), _relayCount(relayCount),
       _asyncState(DTR004::AsyncState::IDLE),
       _pendingOp(DTR004::OpType::NONE),
       _asyncDeadline(0), _lastByteMs(0),
@@ -25,17 +30,16 @@ Probots_DTR004_ESP32::Probots_DTR004_ESP32(const char* ip, uint16_t port)
 // ---------------------------------------------------------------------------
 
 DTR004::Error Probots_DTR004_ESP32::setRelay(DTR004::Channel ch, DTR004::RelayState state) {
-    if (ch < DTR004::Channel::CH1 || ch > DTR004::Channel::CH4) {
-        return DTR004::Error::INVALID_CHANNEL;
-    }
+    uint8_t n = (uint8_t)ch;
+    if (n < 1 || n > _relayCount) return DTR004::Error::INVALID_CHANNEL;
     String body;
-    return _httpGet(_relayPath((uint8_t)ch, (uint8_t)state), body);
+    return _httpGet(_relayPath(n, (uint8_t)state), body);
 }
 
-DTR004::Error Probots_DTR004_ESP32::setRelayBitmask(uint8_t bitmask) {
+DTR004::Error Probots_DTR004_ESP32::setRelayBitmask(uint32_t bitmask) {
     DTR004::Error worst = DTR004::Error::NONE;
-    for (uint8_t i = 1; i <= 4; i++) {
-        DTR004::RelayState s = (bitmask & (1 << (i - 1)))
+    for (uint8_t i = 1; i <= _relayCount; i++) {
+        DTR004::RelayState s = (bitmask & (1UL << (i - 1)))
                                ? DTR004::RelayState::ON
                                : DTR004::RelayState::OFF;
         DTR004::Error e = setRelay((DTR004::Channel)i, s);
@@ -44,18 +48,18 @@ DTR004::Error Probots_DTR004_ESP32::setRelayBitmask(uint8_t bitmask) {
     return worst;
 }
 
-uint8_t Probots_DTR004_ESP32::getInputStates(DTR004::Error* err) {
+uint32_t Probots_DTR004_ESP32::getInputStates(DTR004::Error* err) {
     String body;
     DTR004::Error e = _httpGet("/input.cgi", body);
     if (err) *err = e;
-    return (e == DTR004::Error::NONE) ? _parseBitmask(body) : 0;
+    return (e == DTR004::Error::NONE) ? _parseBitmask(body, _relayCount) : 0;
 }
 
-uint8_t Probots_DTR004_ESP32::getRelayStates(DTR004::Error* err) {
+uint32_t Probots_DTR004_ESP32::getRelayStates(DTR004::Error* err) {
     String body;
     DTR004::Error e = _httpGet("/status.cgi", body);
     if (err) *err = e;
-    return (e == DTR004::Error::NONE) ? _parseBitmask(body) : 0;
+    return (e == DTR004::Error::NONE) ? _parseBitmask(body, _relayCount) : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -65,18 +69,19 @@ uint8_t Probots_DTR004_ESP32::getRelayStates(DTR004::Error* err) {
 bool Probots_DTR004_ESP32::setRelayAsync(DTR004::Channel ch, DTR004::RelayState state,
                                           DTR004::RelayCallback cb) {
     if (_asyncState != DTR004::AsyncState::IDLE) return false;
-    if (ch < DTR004::Channel::CH1 || ch > DTR004::Channel::CH4) {
-        if (cb) cb({(uint8_t)ch, state, DTR004::Error::INVALID_CHANNEL});
+    uint8_t n = (uint8_t)ch;
+    if (n < 1 || n > _relayCount) {
+        if (cb) cb({n, state, DTR004::Error::INVALID_CHANNEL});
         return false;
     }
-    _pendingOp          = DTR004::OpType::SET_RELAY;
-    _pendingCh          = (uint8_t)ch;
-    _pendingRelayState  = state;
-    _pendingPath        = _relayPath((uint8_t)ch, (uint8_t)state);
-    _relayCb            = cb;
-    _rxBuf              = "";
-    _asyncDeadline      = millis() + DTR004_TIMEOUT_MS;
-    _asyncState         = DTR004::AsyncState::CONNECTING;
+    _pendingOp         = DTR004::OpType::SET_RELAY;
+    _pendingCh         = n;
+    _pendingRelayState = state;
+    _pendingPath       = _relayPath(n, (uint8_t)state);
+    _relayCb           = cb;
+    _rxBuf             = "";
+    _asyncDeadline     = millis() + DTR004_TIMEOUT_MS;
+    _asyncState        = DTR004::AsyncState::CONNECTING;
     return true;
 }
 
@@ -112,6 +117,10 @@ void Probots_DTR004_ESP32::_smStep() {
     switch (_asyncState) {
 
         case DTR004::AsyncState::CONNECTING:
+            if (WiFi.status() != WL_CONNECTED) {
+                _finishAsync(DTR004::Error::WIFI_DISCONNECTED);
+                return;
+            }
             if (_client.connect(_ip, _port)) {
                 _client.print(String("GET ") + _pendingPath + " HTTP/1.0\r\n"
                               "Host: " + _ip + "\r\n\r\n");
@@ -124,17 +133,14 @@ void Probots_DTR004_ESP32::_smStep() {
             break;
 
         case DTR004::AsyncState::RECEIVING:
-            // Drain every available byte this tick — never busy-waits.
             while (_client.available()) {
                 _rxBuf += (char)_client.read();
                 _lastByteMs = millis();
             }
-            // The DT-R004 HTTP server often holds the TCP connection open even
-            // after delivering the full response. Declare "done" when EITHER:
-            //   (a) the server closed the connection, OR
-            //   (b) we received at least one byte and no new data for 300 ms.
+            // Declare done when server closes connection OR no new data for 300 ms
+            // after at least one byte — the DT-R HTTP server often holds TCP open.
             {
-                bool serverClosed = !_client.connected();
+                bool serverClosed  = !_client.connected();
                 bool idleAfterData = (_rxBuf.length() > 0) &&
                                      (millis() - _lastByteMs > 300);
                 if (serverClosed || idleAfterData) {
@@ -149,7 +155,7 @@ void Probots_DTR004_ESP32::_smStep() {
                     body.trim();
 
                     if (_pendingOp == DTR004::OpType::GET_INPUTS && _inputCb) {
-                        _inputCb({_parseBitmask(body), DTR004::Error::NONE});
+                        _inputCb({_parseBitmask(body, _relayCount), DTR004::Error::NONE});
                     } else if (_pendingOp == DTR004::OpType::SET_RELAY && _relayCb) {
                         _relayCb({_pendingCh, _pendingRelayState, DTR004::Error::NONE});
                     }
@@ -229,7 +235,12 @@ const char* Probots_DTR004_ESP32::errorToString(DTR004::Error err) {
         case DTR004::Error::INVALID_CHANNEL:   return "Invalid Channel";
         case DTR004::Error::BUSY:              return "SDK Busy";
         case DTR004::Error::WIFI_DISCONNECTED: return "WiFi Disconnected";
-        default:                               return "Unknown";
+        case DTR004::Error::DEVICE_NOT_FOUND:  return "RS485 Sensor Not Found on Bus";
+        case DTR004::Error::MB_ILLEGAL_FUNC:   return "Modbus: Illegal Function";
+        case DTR004::Error::MB_ILLEGAL_VALUE:  return "Modbus: Illegal Data Value";
+        case DTR004::Error::MB_SLAVE_FAILURE:  return "Modbus: Slave Device Failure";
+        case DTR004::Error::MB_EXCEPTION:      return "Modbus: Exception (see getLastExceptionCode)";
+        default:                               return "Unknown Error";
     }
 }
 
@@ -280,24 +291,26 @@ DTR004::Error Probots_DTR004_ESP32::_httpGet(const String& path, String& bodyOut
     return DTR004::Error::NONE;
 }
 
-// Parses several response formats the DT-R004 firmware uses:
-//   "on,off,on,off"  (comma-separated words)
-//   "1,0,1,0"        (comma-separated digits)
-//   "1010"           (packed binary string)
-//   {"in1":1,"in2":0,...}  (minimal JSON subset)
-uint8_t Probots_DTR004_ESP32::_parseBitmask(const String& body) {
-    uint8_t mask = 0;
+// Parses several response formats the DT-R firmware emits:
+//   "on,off,on,off"   comma-separated words  (count tokens)
+//   "1,0,1,0"         comma-separated digits
+//   "1010"            packed binary string
+//   {"in1":1,"in2":0} minimal JSON subset
+uint32_t Probots_DTR004_ESP32::_parseBitmask(const String& body, uint8_t count) {
+    uint32_t mask = 0;
 
     // JSON-style: scan for "inN":X or "relayN":X patterns
     if (body.indexOf('{') != -1) {
-        for (uint8_t i = 1; i <= 4; i++) {
-            String key1 = "\"in" + String(i) + "\":";
+        for (uint8_t i = 1; i <= count; i++) {
+            String key1 = "\"in"    + String(i) + "\":";
             String key2 = "\"relay" + String(i) + "\":";
             int idx = body.indexOf(key1);
             if (idx == -1) idx = body.indexOf(key2);
             if (idx == -1) continue;
+            // The value character follows the colon — use key1.length() as offset
+            // regardless of which key matched (both have the same suffix ":").
             char val = body.charAt(idx + key1.length());
-            if (val == '1' || val == 't') mask |= (1 << (i - 1));
+            if (val == '1' || val == 't') mask |= (1UL << (i - 1));
         }
         return mask;
     }
@@ -307,12 +320,11 @@ uint8_t Probots_DTR004_ESP32::_parseBitmask(const String& body) {
     s.toLowerCase();
     s.replace(" ", "");
 
-    // Packed string like "1010" or "0101"
-    if (s.indexOf(',') == -1 && s.length() >= 4) {
-        for (uint8_t i = 0; i < 4; i++) {
-            if (s.charAt(i) == '1' || s.charAt(i) == 'n') { // 'n' from "on"
-                mask |= (1 << i);
-            }
+    if (s.indexOf(',') == -1 && s.length() >= (unsigned)count) {
+        // Packed string: "1010..." or "onoffonoff..." — read one char per channel
+        for (uint8_t i = 0; i < count; i++) {
+            char c = s.charAt(i);
+            if (c == '1' || c == 'o') mask |= (1UL << i); // 'o' for "on"
         }
         return mask;
     }
@@ -320,12 +332,12 @@ uint8_t Probots_DTR004_ESP32::_parseBitmask(const String& body) {
     // Comma-delimited tokens
     uint8_t ch = 0;
     int start = 0;
-    while (ch < 4) {
+    while (ch < count) {
         int comma = s.indexOf(',', start);
         String token = (comma != -1) ? s.substring(start, comma) : s.substring(start);
         token.trim();
         if (token == "1" || token == "on" || token == "true") {
-            mask |= (1 << ch);
+            mask |= (1UL << ch);
         }
         ch++;
         if (comma == -1) break;

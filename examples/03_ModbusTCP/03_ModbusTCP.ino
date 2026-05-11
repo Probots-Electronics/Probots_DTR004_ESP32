@@ -1,21 +1,25 @@
 /*
- * 03_ModbusTCP — Control DT-R004 relays and read inputs via Modbus TCP
+ * 03_ModbusTCP — Control DT-R series relays via Modbus TCP
  *
- * The DT-R004 is itself a Modbus TCP server. Unit ID 0xFF addresses its
- * own relays and digital inputs using holding registers (FC 0x03/0x06).
- * Unit IDs 1–247 are forwarded to the RS485 bus.
+ * The DT-R module is a Modbus TCP server. Unit ID 0xFF addresses its own
+ * relays and digital inputs via holding registers (FC 0x03/0x06).
+ * Unit IDs 1–247 are forwarded to the RS485 bus as Modbus RTU pass-through.
  *
- * Register map (verified from Dingtian SDK programming manual):
- *   0x0001  FC 0x03 → relay bitmask (bit0=relay1, read)
- *   0x0002  FC 0x06 → write-all: high-byte=update mask, low-byte=new states
- *   0x000A  FC 0x03 → input bitmask (bit0=input1, read)
- *   0x0036  FC 0x06 → relay1 individual write (0=OFF, 1=ON)
- *   0x0037  FC 0x06 → relay2 individual write
- *   0x0038  FC 0x06 → relay3 individual write
- *   0x0039  FC 0x06 → relay4 individual write
+ * Register map (Dingtian SDK programming manual):
+ *   0x0000  FC 0x03 → relay count (reads actual channel count of your board)
+ *   0x0001  FC 0x03 → relay bitmask (bit0=relay1)
+ *   0x0002  FC 0x06 → write-all: high-byte=update mask, low-byte=new states (≤8 ch)
+ *   0x000A  FC 0x03 → input bitmask (bit0=input1)
+ *   0x0036+N FC 0x06 → relay N individual write (0=OFF, 1=ON)
  *
- * DT-R004 web UI prerequisite:
+ * Web UI prerequisite:
  *   Relay Connect → TCP Server → Modbus-TCP, Local Port 502
+ *
+ * Compatible with all DT-R boards from probots.co.in:
+ *   DT-R002 / DT-R004 / DT-R008 / DT-R016 / DT-R032
+ *   Pass your board's relay count as the fourth constructor argument.
+ *
+ * Buy at: https://probots.co.in
  */
 
 #include <WiFi.h>
@@ -24,7 +28,8 @@
 const char* WIFI_SSID = "dtrelay65905";
 const char* WIFI_PASS = "dtpassword";
 
-// Unit ID defaults to 0xFF — addresses DT-R004's own relays
+// Unit ID 0xFF = DT-R board's own relays. Fourth arg = relay count (default 4).
+// For an 8-channel DT-R008: DTR004_ModbusTCP relay("192.168.7.1", 502, 0xFF, 8);
 DTR004_ModbusTCP relay("192.168.7.1");
 
 void setup() {

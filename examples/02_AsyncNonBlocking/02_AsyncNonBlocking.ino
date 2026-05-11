@@ -8,6 +8,9 @@
  *
  * Key rule: call relay.update() every loop() iteration.
  *           Only one async op may be in-flight; check isBusy() before queuing.
+ *
+ * Compatible with all DT-R boards from probots.co.in (pass relay count to constructor).
+ * Buy at: https://probots.co.in
  */
 
 #include <WiFi.h>

@@ -11,6 +11,11 @@
  *  A PLC-style controller that must keep running even if the relay module
  *  power-cycles, and must alert the operator (via Serial / MQTT / buzzer)
  *  the moment connectivity is lost or restored.
+ *
+ * Compatible with all DT-R boards from probots.co.in:
+ *   DT-R002 / DT-R004 / DT-R008 / DT-R016 / DT-R032
+ *
+ * Buy at: https://probots.co.in
  */
 
 #include <WiFi.h>

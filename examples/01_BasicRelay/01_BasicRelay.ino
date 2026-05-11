@@ -1,14 +1,21 @@
 /*
- * 01_BasicRelay — Synchronous API (drop-in replacement for v1 library)
+ * 01_BasicRelay — Synchronous API
  *
  * Demonstrates:
  *  - Synchronous relay writes with error checking
- *  - Bitmask-based input reads (uint8_t, not String)
- *  - Channel enum for type-safe channel selection
+ *  - uint32_t bitmask input reads (bit 0 = DI1, bit N-1 = DIN)
+ *  - Channel enum for type-safe channel selection (CH1 … CH32)
  *
- * Wiring / Network:
- *  ESP32 connects to the DT-R004's own WiFi AP ("dtrelay…" network)
- *  or the DT-R004 is on the same LAN as the ESP32.
+ * Hardware:
+ *  Works with any DT-R series board from probots.co.in:
+ *  DT-R002 / DT-R004 / DT-R008 / DT-R016 / DT-R032
+ *  Pass your board's channel count as the third constructor argument.
+ *
+ * Network:
+ *  Connect the ESP32 to the DT-R module's own WiFi AP ("dtrelay…")
+ *  or put both on the same LAN.
+ *
+ * Buy at: https://probots.co.in
  */
 
 #include <WiFi.h>
@@ -17,7 +24,8 @@
 const char* WIFI_SSID = "dtrelay65905";
 const char* WIFI_PASS = "dtpassword";
 
-// Point to the module's IP. Change if you configured a static IP.
+// Point to the module's IP. Third arg = relay count (default 4 for DT-R004).
+// For an 8-channel DT-R008: Probots_DTR004_ESP32 relay("192.168.7.1", 80, 8);
 Probots_DTR004_ESP32 relay("192.168.7.1");
 
 void setup() {
@@ -51,6 +59,7 @@ void loop() {
     uint8_t inputs = relay.getInputStates(&err);
 
     if (err == DTR004::Error::NONE) {
+        // isBitSet works for all board sizes: ch is 1-based (1=DI1, N=DIN)
         Serial.printf("Digital Inputs: DI1=%d  DI2=%d  DI3=%d  DI4=%d\n",
                       DTR004::isBitSet(inputs, 1),
                       DTR004::isBitSet(inputs, 2),
